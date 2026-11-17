@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RayStrike — 3D Raycaster FPS</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #05070c;
+    font-family: "Segoe UI", Arial, sans-serif;
+    color: #eaf6ff;
+  }
+
+  #game {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  #view {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+  }
+
+  #hud {
+    position: absolute;
+    left: 24px;
+    bottom: 24px;
+    display: flex;
+    gap: 14px;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  .panel {
+    min-width: 125px;
+    padding: 10px 16px;
+    border: 1px solid rgba(0, 229, 255, 0.35);
+    border-radius: 10px;
+    background: rgba(4, 10, 18, 0.72);
+    backdrop-filter: blur(6px);
+    text-align: center;
+  }
+
+  .panel span {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #79d8ff;
+  }
+
+  .panel strong {
+    font-size: 24px;
+  }
+
+  #minimap {
+    position: absolute;
+    top: 24px;
+    right: 24px;
+    width: 210px;
+    height: 210px;
+    border: 1px solid rgba(0, 229, 255, 0.45);
+    border-radius: 10px;
+    background: rgba(3, 8, 14, 0.75);
+    box-shadow: 0 0 25px rgba(0, 229, 255, 0.12);
+    z-index: 10;
+  }
+
+  #overlay,
+  #gameOver {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    gap: 16px;
+    text-align: center;
+    background: rgba(2, 5, 10, 0.88);
+    z-index: 20;
+  }
+
+  #overlay h1,
+  #gameOver h1 {
+    font-size: clamp(40px, 8vw, 82px);
+    letter-spacing: 7px;
+    color: #00e5ff;
+    text-shadow: 0 0 22px rgba(0, 229, 255, 0.65);
+  }
+
+  #overlay p,
+  #gameOver p {
+    color: #b9d6e6;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+
+  button {
+    margin: 0 auto;
+    padding: 13px 32px;
+    border: 0;
+    border-radius: 8px;
+    font: 700 15px/1 "Segoe UI", Arial, sans-serif;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #04121a;
+    background: #00e5ff;
+    cursor: pointer;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+
+  button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0 22px rgba(0, 229, 255, .55);
+  }
+
+  .hidden { display: none; }
+
+  #damage {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle, transparent 45%, rgba(255, 25, 65, .55));
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+    z-index: 15;
+  }
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="view"></canvas>
+  <canvas id="minimap" width="420" height="420"></canvas>
+
+  <div id="damage"></div>
+
+  <div id="hud">
+    <div class="panel"><span>Score</span><strong id="score">0</strong></div>
+    <div class="panel"><span>Health</span><strong id="health">100</strong></div>
+    <div class="panel"><span>Ammo</span><strong id="ammo">24</strong></div>
+  </div>
+
+  <div id="overlay">
+    <h1>RAYSTRIKE</h1>
+    <p>
+      <b>W A S D</b> — move<br />
+      Mouse — look<br />
+      <b>Right-click</b> — shoot<br />
+      <b>Shift</b> — sprint
+    </p>
+    <button id="start">Start Mission</button>
+  </div>
+
+  <div id="gameOver" class="hidden">
+    <h1>MISSION FAILED</h1>
+    <p>Enemies eliminated: <span id="finalScore">0</span></p>
+    <button id="restart">Try Again</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const view = document.getElementById("view");
+  const ctx = view.getContext("2d", { alpha: false });
+
+  const minimap = document.getElementById("minimap");
+  const mini = minimap.getContext("2d");
+
+  const scoreEl = document.getElementById("score");
+  const healthEl = document.getElementById("health");
+  const ammoEl = document.getElementById("ammo");
+  const overlay = document.getElementById("overlay");
+  const gameOver = document.getElementById("gameOver");
+  const finalScore = document.getElementById("finalScore");
+  const damageFlash = document.getElementById("damage");
+
+  const MAP = [
+    "1111111111111111",
+    "1000000000000001",
+    "1011110111101101",
+    "1010000100001001",
+    "1010111101101101",
+    "1000100000001001",
+    "1110101111101111",
+    "1000100000000001",
+    "1011110111110101",
+    "1000000100000101",
+    "1111100101111101",
+    "1000000100000001",
+    "1011111111111101",
+    "1000000000000001",
+    "1011110111111101",
+    "1111111111111111"
+  ];
+
+  const MAP_W = MAP[0].length;
+  const MAP_H = MAP.length;
+  const TILE = 1;
+
+  const FOV = Math.PI / 3;
+  const TEX_SIZE = 64;
+
+  let W = 0, H = 0;
+  let running = false;
+  let score = 0, health = 100, ammo = 24;
+
+  const player = {
+    x: 2.5,
+    y: 2.5,
+    angle: 0,
+    speed: 3.1,
+    sprint: 1.75,
+    radius: 0.22
+  };
+
+  const keys = { w: false, a: false, s: false, d: false, shift: false };
+  const enemies = [];
+  const bullets = [];
+  const zBuffer = [];
+
+  const textures = [];
+  const enemySprite = document.createElement("canvas");
+  enemySprite.width = 64;
+  enemySprite.height = 64;
+
+  function makeTexture(type) {
+    const canvas = document.createElement("canvas");
+    canvas.width = TEX_SIZE;
+    canvas.height = TEX_SIZE;
+    const c = canvas.getContext("2d");
+
+    if (type === 1) {
+      c.fillStyle = "#6b4b2c";
+      c.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+
+      for (let y = 0; y < TEX_SIZE; y += 16) {
+        for (let x = 0; x < TEX_SIZE; x += 32) {
+          c.fillStyle = (y / 16) % 2 ? "#7d5935" : "#5c4025";
+          c.fillRect(x + ((y / 16) % 2 ? 16 : 0), y, 30, 14);
+        }
+      }
+
+      c.strokeStyle = "rgba(0,0,0,.35)";
+      c.lineWidth = 2;
+
+      for (let y = 0; y <= TEX_SIZE; y += 16) {
+        c.beginPath();
+        c.moveTo(0, y);
+        c.lineTo(TEX_SIZE, y);
+        c.stroke();
+      }
+    }
+
+    if (type === 2) {
+      const gradient = c.createLinearGradient(0, 0, TEX_SIZE, TEX_SIZE);
+      gradient.addColorStop(0, "#2c3d55");
+      gradient.addColorStop(1, "#16202e");
+      c.fillStyle = gradient;
+      c.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+
+      c.strokeStyle = "#4fd8ff";
+      c.lineWidth = 2;
+      c.shadowColor = "#4fd8ff";
+      c.shadowBlur = 8;
+
+      for (let i = 8; i < TEX_SIZE; i += 16) {
+        c.beginPath();
+        c.moveTo(i, 0);
+        c.lineTo(i, TEX_SIZE);
+        c.stroke();
+      }
+
+      c.shadowBlur = 0;
+    }
+
+    if (type === 3) {
+      c.fillStyle = "#3b3f47";
+      c.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+
+      for (let i = 0; i < 900; i++) {
+        const shade = 45 + Math.random() * 55;
+        c.fillStyle = `rgb(${shade},${shade + 5},${shade + 12})`;
+        c.fillRect(Math.random() * TEX_SIZE, Math.random() * TEX_SIZE, 3, 3);
+      }
+
+      c.strokeStyle = "#22262d";
+      c.lineWidth = 4;
+      c.strokeRect(2, 2, TEX_SIZE - 4, TEX_SIZE - 4);
+    }
+
+    return canvas;
+  }
+
+  function makeEnemySprite() {
+    const c = enemySprite.getContext("2d");
+    c.clearRect(0, 0, 64, 64);
+
+    c.fillStyle = "#ff2f5e";
+    c.shadowColor = "#ff2f5e";
+    c.shadowBlur = 12;
+
+    c.beginPath();
+    c.arc(32, 26, 17, 0, Math.PI * 2);
+    c.fill();
+
+    c.fillRect(19, 40, 26, 20);
+
+    c.fillStyle = "#0b0d12";
+    c.beginPath();
+    c.arc(25, 24, 4, 0, Math.PI * 2);
+    c.arc(39, 24, 4, 0, Math.PI * 2);
+    c.fill();
+
+    c.fillStyle = "#ffe066";
+    c.fillRect(24, 44, 16, 4);
+  }
+
+  function resize() {
+    W = view.width = Math.floor(window.innerWidth);
+    H = view.height = Math.floor(window.innerHeight);
+    zBuffer.length = W;
+  }
+
+  function isWall(x, y) {
+    if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) return true;
+    return MAP[Math.floor(y)][Math.floor(x)] !== "0";
+  }
+
+  function canMove(x, y) {
+    const r = player.radius;
+
+    return (
+      !isWall(x - r, y - r) &&
+      !isWall(x + r, y - r) &&
+      !isWall(x - r, y + r) &&
+      !isWall(x + r, y + r)
+    );
+  }
+
+  function updateHUD() {
+    scoreEl.textContent = score;
+    healthEl.textContent = health;
+    ammoEl.textContent = ammo;
+  }
+
+  function startGame() {
+    score = 0;
+    health = 100;
+    ammo = 24;
+    enemies.length = 0;
+    bullets.length = 0;
+
+    player.x = 2.5;
+    player.y = 2.5;
+    player.angle = 0;
+
+    for (let i = 0; i < 7; i++) spawnEnemy();
+
+    updateHUD();
+    overlay.classList.add("hidden");
+    gameOver.classList.add("hidden");
+
+    running = true;
+    view.requestPointerLock();
+  }
+
+  function spawnEnemy() {
+    let x, y;
+
+    do {
+      x = 1.5 + Math.random() * (MAP_W - 3);
+      y = 1.5 + Math.random() * (MAP_H - 3);
+    } while (isWall(x, y) || Math.hypot(x - player.x, y - player.y) < 4);
+
+    enemies.push({
+      x, y,
+      health: 2,
+      speed: 0.75 + Math.random() * 0.65,
+      hitTimer: 0
+    });
+  }
+
+  function shoot() {
+    if (!running || ammo <= 0) return;
+
+    ammo--;
+    updateHUD();
+
+    const dirX = Math.cos(player.angle);
+    const dirY = Math.sin(player.angle);
+
+    let target = null;
+    let bestDistance = Infinity;
+
+    for (const enemy of enemies) {
+      const dx = enemy.x - player.x;
+      const dy = enemy.y - player.y;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance <= 0.01) continue;
+
+      const along = dx * dirX + dy * dirY;
+
+      if (along <= 0) continue;
+
+      const perpendicular = Math.abs(dx * dirY - dy * dirX);
+
+      if (perpendicular < 0.42 && along < bestDistance) {
+        target = enemy;
+        bestDistance = along;
+      }
+    }
+
+    if (target) {
+      target.health--;
+
+      if (target.health <= 0) {
+        enemies.splice(enemies.indexOf(target), 1);
+        score++;
+        ammo = Math.min(24, ammo + 2);
+        updateHUD();
+
+        if (enemies.length < 10) spawnEnemy();
+      }
+    }
+  }
+
+  function update(dt) {
+    if (!running) return;
+
+    let forward = 0;
+    let strafe = 0;
+
+    if (keys.w) forward += 1;
+    if (keys.s) forward -= 1;
+    if (keys.a) strafe -= 1;
+    if (keys.d) strafe += 1;
+
+    if (forward || strafe) {
+      const length = Math.hypot(forward, strafe);
+      forward /= length;
+      strafe /= length;
+
+      const speed = player.speed * (keys.shift ? player.sprint : 1);
+      const cos = Math.cos(player.angle);
+      const sin = Math.sin(player.angle);
+
+      const nx = player.x + (cos * forward - sin * strafe) * speed * dt;
+      const ny = player.y + (sin * forward + cos * strafe) * speed * dt;
+
+      if (canMove(nx, player.y)) player.x = nx;
+      if (canMove(player.x, ny)) player.y = ny;
+    }
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const enemy = enemies[i];
+      const dx = player.x - enemy.x;
+      const dy = player.y - enemy.y;
+      const distance = Math.hypot(dx, dy) || 1;
+
+      const nx = enemy.x + (dx / distance) * enemy.speed * dt;
+      const ny = enemy.y + (dy / distance) * enemy.speed * dt;
+
+      if (!isWall(nx, enemy.y)) enemy.x = nx;
+      if (!isWall(enemy.x, ny)) enemy.y = ny;
+
+      if (distance < 0.65) {
+        health -= 12;
+        updateHUD();
+
+        damageFlash.style.opacity = "0.9";
+        setTimeout(() => damageFlash.style.opacity = "0", 140);
+
+        enemies.splice(i, 1);
+
+        if (health <= 0) {
+          endGame();
+          return;
+        }
+      }
+    }
+  }
+
+  function castRay(column) {
+    const cameraX = 2 * column / W - 1;
+
+    const dirX = Math.cos(player.angle);
+    const dirY = Math.sin(player.angle);
+    const planeX = -dirY * Math.tan(FOV / 2);
+    const planeY = dirX * Math.tan(FOV / 2);
+
+    const rayX = dirX + planeX * cameraX;
+    const rayY = dirY + planeY * cameraX;
+
+    let mapX = Math.floor(player.x);
+    let mapY = Math.floor(player.y);
+
+    const deltaDistX = Math.abs(rayX) < 1e-8 ? 1e30 : Math.abs(1 / rayX);
+    const deltaDistY = Math.abs(rayY) < 1e-8 ? 1e30 : Math.abs(1 / rayY);
+
+    let stepX, stepY, sideDistX, sideDistY;
+
+    if (rayX < 0) {
+      stepX = -1;
+      sideDistX = (player.x - mapX) * deltaDistX;
+    } else {
+      stepX = 1;
+      sideDistX = (mapX + 1 - player.x) * deltaDistX;
+    }
+
+    if (rayY < 0) {
+      stepY = -1;
+      sideDistY = (player.y - mapY) * deltaDistY;
+    } else {
+      stepY = 1;
+      sideDistY = (mapY + 1 - player.y) * deltaDistY;
+    }
+
+    let hit = false;
+    let side = 0;
+    let wallType = 1;
+
+    while (!hit) {
+      if (sideDistX < sideDistY) {
+        sideDistX += deltaDistX;
+        mapX += stepX;
+        side = 0;
+      } else {
+        sideDistY += deltaDistY;
+        mapY += stepY;
+        side = 1;
+      }
+
+      if (mapX < 0 || mapY < 0 || mapX >= MAP_W || mapY >= MAP_H) {
+        wallType = 1;
+        hit = true;
+        break;
+      }
+
+      const cell = Number(MAP[mapY][mapX]);
+
+      if (cell > 0) {
+        wallType = cell;
+        hit = true;
+      }
+    }
+
+    const perpDist = side === 0
+      ? sideDistX - deltaDistX
+      : sideDistY - deltaDistY;
+
+    let wallX = side === 0
+      ? player.y + perpDist * rayY
+      : player.x + perpDist * rayX;
+
+    wallX -= Math.floor(wallX);
+
+    return {
+      distance: perpDist,
+      wallX,
+      texture: textures[wallType - 1],
+      side
+    };
+  }
+
+  function renderWalls() {
+    const ceiling = ctx.createLinearGradient(0, 0, 0, H / 2);
+    ceiling.addColorStop(0, "#0a1522");
+    ceiling.addColorStop(1, "#182c42");
+
+    ctx.fillStyle = ceiling;
+    ctx.fillRect(0, 0, W, H / 2);
+
+    const floor = ctx.createLinearGradient(0, H / 2, 0, H);
+    floor.addColorStop(0, "#101820");
+    floor.addColorStop(1, "#05080c");
+
+    ctx.fillStyle = floor;
+    ctx.fillRect(0, H / 2, W, H / 2);
+
+    for (let x = 0; x < W; x++) {
+      const ray = castRay(x);
+      const distance = Math.max(ray.distance, 0.01);
+
+      zBuffer[x] = distance;
+
+      const lineHeight = H / distance;
+      const drawStart = Math.max(0, (H - lineHeight) / 2);
+      const drawEnd = Math.min(H, (H + lineHeight) / 2);
+
+      const textureX = Math.min(
+        TEX_SIZE - 1,
+        Math.floor(ray.wallX * TEX_SIZE)
+      );
+
+      ctx.drawImage(
+        ray.texture,
+        textureX, 0, 1, TEX_SIZE,
+        x, drawStart, 1, drawEnd - drawStart
+      );
+
+      const shade = Math.min(0.72, distance / 16);
+      const sideShade = ray.side === 1 ? 0.16 : 0;
+
+      ctx.fillStyle = `rgba(2, 6, 12, ${shade + sideShade})`;
+      ctx.fillRect(x, drawStart, 1, drawEnd - drawStart);
+    }
+  }
+
+  function renderEnemies() {
+    const dirX = Math.cos(player.angle);
+    const dirY = Math.sin(player.angle);
+    const planeX = -dirY * Math.tan(FOV / 2);
+    const planeY = dirX * Math.tan(FOV / 2);
+
+    const invDet = 1 / (planeX * dirY - dirX * planeY);
+
+    const sorted = [...enemies].sort((a, b) => {
+      const da = (a.x - player.x) ** 2 + (a.y - player.y) ** 2;
+      const db = (b.x - player.x) ** 2 + (b.y - player.y) ** 2;
+      return db - da;
+    });
+
+    for (const enemy of sorted) {
+      const dx = enemy.x - player.x;
+      const dy = enemy.y - player.y;
+
+      const transformX = invDet * (dirY * dx - dirX * dy);
+      const transformY = invDet * (-planeY * dx + planeX * dy);
+
+      if (transformY <= 0.15) continue;
+
+      const screenX = Math.floor((W / 2) * (1 + transformX / transformY));
+      const spriteHeight = Math.abs(H / transformY) * 0.85;
+      const spriteWidth = spriteHeight;
+
+      const drawStartY = -spriteHeight / 2 + H / 2;
+      const drawEndY = spriteHeight / 2 + H / 2;
+      const drawStartX = -spriteWidth / 2 + screenX;
+      const drawEndX = spriteWidth / 2 + screenX;
+
+      for (let x = Math.max(0, Math.floor(drawStartX)); x < Math.min(W, drawEndX); x++) {
+        if (transformY >= zBuffer[x]) continue;
+
+        const texX = Math.floor(
+          ((x - drawStartX) * TEX_SIZE) / spriteWidth
+        );
+
+        ctx.drawImage(
+          enemySprite,
+          texX, 0, 1, TEX_SIZE,
+          x, drawStartY, 1, drawEndY - drawStartY
+        );
+      }
+    }
+  }
+
+  function renderWeapon() {
+    const bob = Math.sin(performance.now() / 130) * 5;
+    const baseX = W / 2;
+    const baseY = H + bob;
+
+    ctx.fillStyle = "#171d26";
+    ctx.beginPath();
+    ctx.moveTo(baseX - 38, baseY);
+    ctx.lineTo(baseX - 20, baseY - 165);
+    ctx.lineTo(baseX + 20, baseY - 165);
+    ctx.lineTo(baseX + 38, baseY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#00e5ff";
+    ctx.fillRect(baseX - 8, baseY - 190, 16, 30);
+  }
+
+  function renderMinimap() {
+    const size = minimap.width;
+    const scale = size / Math.max(MAP_W, MAP_H);
+
+    mini.clearRect(0, 0, size, size);
+    mini.fillStyle = "rgba(3, 8, 14, .82)";
+    mini.fillRect(0, 0, size, size);
+
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < MAP_W; x++) {
+        const cell = Number(MAP[y][x]);
+
+        if (cell === 0) {
+          mini.fillStyle = "rgba(0, 229, 255, .07)";
+        } else {
+          mini.fillStyle = cell === 1
+            ? "rgba(120, 80, 45, .85)"
+            : cell === 2
+              ? "rgba(0, 150, 220, .85)"
+              : "rgba(90, 100, 115, .85)";
+        }
+
+        mini.fillRect(x * scale, y * scale, scale - 1, scale - 1);
+      }
+    }
+
+    mini.fillStyle = "#ff2f5e";
+
+    for (const enemy of enemies) {
+      mini.beginPath();
+      mini.arc(enemy.x * scale, enemy.y * scale, 5, 0, Math.PI * 2);
+      mini.fill();
+    }
+
+    mini.strokeStyle = "#00e5ff";
+    mini.lineWidth = 2;
+    mini.beginPath();
+    mini.moveTo(player.x * scale, player.y * scale);
+    mini.lineTo(
+      (player.x + Math.cos(player.angle) * 2) * scale,
+      (player.y + Math.sin(player.angle) * 2) * scale
+    );
+    mini.stroke();
+
+    mini.fillStyle = "#00e5ff";
+    mini.beginPath();
+    mini.arc(player.x * scale, player.y * scale, 6, 0, Math.PI * 2);
+    mini.fill();
+  }
+
+  function render() {
+    renderWalls();
+    renderEnemies();
+    renderWeapon();
+    renderMinimap();
+  }
+
+  function endGame() {
+    running = false;
+    finalScore.textContent = score;
+    gameOver.classList.remove("hidden");
+    document.exitPointerLock();
+  }
+
+  function loop(previous) {
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - previous) / 1000);
+
+    update(dt);
+    render();
+
+    requestAnimationFrame(loop);
+  }
+
+  window.addEventListener("resize", resize);
+
+  window.addEventListener("keydown", event => {
+    const key = event.code.replace("Key", "").toLowerCase();
+
+    if (key in keys) keys[key] = true;
+
+    if (event.code === "Space") event.preventDefault();
+  });
+
+  window.addEventListener("keyup", event => {
+    const key = event.code.replace("Key", "").toLowerCase();
+
+    if (key in keys) keys[key] = false;
+  });
+
+  view.addEventListener("mousemove", event => {
+    if (document.pointerLockElement !== view) return;
+    player.angle += event.movementX * 0.0026;
+  });
+
+  view.addEventListener("mousedown", event => {
+    if (event.button === 2) {
+      event.preventDefault();
+      shoot();
+    }
+  });
+
+  view.addEventListener("contextmenu", event => event.preventDefault());
+
+  document.addEventListener("pointerlockchange", () => {
+    if (!document.pointerLockElement && running) {
+      running = false;
+      overlay.classList.remove("hidden");
+    }
+  });
+
+  document.getElementById("start").addEventListener("click", startGame);
+  document.getElementById("restart").addEventListener("click", startGame);
+
+  textures.push(makeTexture(1), makeTexture(2), makeTexture(3));
+  makeEnemySprite();
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
