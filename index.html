@@ -215,6 +215,9 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   let score = 0, health = 100, ammo = 24;
   let lastFrameTime = 0;
   let damageFlashUntil = 0;
+  let muzzleFlashUntil = 0;
+  let recoilUntil = 0;
+  let hitMarkerUntil = 0;
 
   let ceilingGradient = null;
   let floorGradient = null;
@@ -375,11 +378,32 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     return MAP[Math.floor(y)][Math.floor(x)] !== "0";
   }
 
-  function canMove(x, y) {
-    const r = player.radius;
+  function collidesWithWall(x, y, radius) {
+    const minX = Math.floor(x - radius);
+    const maxX = Math.floor(x + radius);
+    const minY = Math.floor(y - radius);
+    const maxY = Math.floor(y + radius);
 
-    return !isWall(x - r, y - r) && !isWall(x + r, y - r) &&
-           !isWall(x - r, y + r) && !isWall(x + r, y + r);
+    for (let tileY = minY; tileY <= maxY; tileY++) {
+      for (let tileX = minX; tileX <= maxX; tileX++) {
+        if (tileX < 0 || tileY < 0 ||
+            tileX >= MAP_W || tileY >= MAP_H ||
+            MAP[tileY][tileX] !== "0") {
+          const closestX = Math.max(tileX, Math.min(x, tileX + 1));
+          const closestY = Math.max(tileY, Math.min(y, tileY + 1));
+          const dx = x - closestX;
+          const dy = y - closestY;
+
+          if (dx * dx + dy * dy < radius * radius) return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function canMove(x, y) {
+    return !collidesWithWall(x, y, player.radius);
   }
 
   function updateHUD() {
@@ -406,7 +430,15 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
       const dx = x - player.x;
       const dy = y - player.y;
 
-      if (!isWall(x, y) && dx * dx + dy * dy >= 16) {
+      const overlapsEnemy = enemies.some(enemy => {
+        const edx = enemy.x - x;
+        const edy = enemy.y - y;
+        return edx * edx + edy * edy < .64;
+      });
+
+      if (!isWall(x, y) &&
+          dx * dx + dy * dy >= 16 &&
+          !overlapsEnemy) {
         enemies.push({
           x, y,
           health: 2,
@@ -472,6 +504,9 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
     damageFlash.style.opacity = "0";
     damageFlashUntil = 0;
+    muzzleFlashUntil = 0;
+    recoilUntil = 0;
+    hitMarkerUntil = 0;
 
     if (showStartScreen) {
       overlay.classList.remove("hidden");
@@ -518,8 +553,10 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     let side = 0;
     let wallType = 1;
     let hit = false;
+    let iterations = 0;
+    const maxIterations = MAP_W * MAP_H;
 
-    while (!hit) {
+    while (!hit && iterations++ < maxIterations) {
       if (sideDistX < sideDistY) {
         sideDistX += deltaDistX;
         mapX += stepX;
@@ -608,6 +645,10 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     ammo--;
     updateHUD();
 
+    const now = performance.now();
+    muzzleFlashUntil = now + 70;
+    recoilUntil = now + 110;
+
     const dirX = Math.cos(player.angle);
     const dirY = Math.sin(player.angle);
     const wallDistance = getWallDistance(dirX, dirY);
@@ -632,6 +673,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     }
 
     if (target) {
+      hitMarkerUntil = performance.now() + 140;
       target.health--;
 
       if (target.health <= 0) {
@@ -821,9 +863,11 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   }
 
   function renderWeapon() {
-    const bob = Math.sin(performance.now() / 130) * 4;
+    const now = performance.now();
+    const bob = Math.sin(now / 130) * 4;
+    const recoil = now < recoilUntil ? 14 : 0;
     const baseX = RENDER_W / 2;
-    const baseY = RENDER_H + bob;
+    const baseY = RENDER_H + bob + recoil;
 
     bctx.fillStyle = "#171d26";
     bctx.beginPath();
@@ -836,6 +880,29 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
     bctx.fillStyle = "#00e5ff";
     bctx.fillRect(baseX - 5, baseY - 108, 10, 17);
+
+    if (now < muzzleFlashUntil) {
+      bctx.fillStyle = "rgba(255,235,140,.9)";
+      bctx.beginPath();
+      bctx.arc(baseX, baseY - 115, 13, 0, Math.PI * 2);
+      bctx.fill();
+
+      bctx.fillStyle = "rgba(255,255,255,.8)";
+      bctx.beginPath();
+      bctx.arc(baseX, baseY - 115, 6, 0, Math.PI * 2);
+      bctx.fill();
+    }
+
+    if (now < hitMarkerUntil) {
+      bctx.strokeStyle = "rgba(255,70,100,.95)";
+      bctx.lineWidth = 3;
+      bctx.beginPath();
+      bctx.moveTo(baseX - 12, RENDER_H / 2 - 12);
+      bctx.lineTo(baseX + 12, RENDER_H / 2 + 12);
+      bctx.moveTo(baseX + 12, RENDER_H / 2 - 12);
+      bctx.lineTo(baseX - 12, RENDER_H / 2 + 12);
+      bctx.stroke();
+    }
   }
 
   function renderMinimap() {
