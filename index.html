@@ -154,8 +154,10 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
 <script>
 (() => {
+  "use strict";
+
   const view = document.getElementById("view");
-  const ctx = view.getContext("2d", { alpha: false });
+  const viewCtx = view.getContext("2d", { alpha: false });
   const minimap = document.getElementById("minimap");
   const mini = minimap.getContext("2d");
 
@@ -195,14 +197,25 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   const FOV = Math.PI / 3;
   const TEX_SIZE = 64;
 
+  // Render the expensive 3D view at a fixed low resolution,
+  // then scale it to the screen. This keeps movement responsive
+  // even on phones and iPads.
+  const RENDER_W = 420;
+  let RENDER_H = 240;
+
+  const buffer = document.createElement("canvas");
+  buffer.width = RENDER_W;
+  const bctx = buffer.getContext("2d", { alpha: false });
+
   let W = 0, H = 0;
   let running = false;
   let score = 0, health = 100, ammo = 24;
+  let lastFrameTime = 0;
 
-  const player = { x: 1.5, y: 1.5, angle: 0, speed: 5.4, sprint: 1.8, radius: .22 };
+  const player = { x: 1.5, y: 1.5, angle: 0, speed: 5.6, sprint: 1.8, radius: .22 };
   const keys = { w: false, a: false, s: false, d: false, shift: false };
   const enemies = [];
-  const zBuffer = [];
+  const zBuffer = new Float32Array(RENDER_W);
 
   const touchMove = { active: false, id: null, centerX: 0, centerY: 0, x: 0, y: 0 };
   const touchLook = { active: false, id: null, lastX: 0 };
@@ -280,9 +293,14 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   }
 
   function resize() {
-    W = view.width = Math.floor(window.innerWidth);
-    H = view.height = Math.floor(window.innerHeight);
-    zBuffer.length = W;
+    W = view.width = Math.max(320, Math.floor(window.innerWidth));
+    H = view.height = Math.max(240, Math.floor(window.innerHeight));
+
+    RENDER_H = Math.max(180, Math.round(RENDER_W * H / W));
+    buffer.width = RENDER_W;
+    buffer.height = RENDER_H;
+
+    viewCtx.imageSmoothingEnabled = false;
   }
 
   function isWall(x, y) {
@@ -303,25 +321,36 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   }
 
   function spawnEnemy() {
-    let x, y;
+    let x, y, attempts = 0;
+
     do {
       x = 1.5 + Math.random() * (MAP_W - 3);
       y = 1.5 + Math.random() * (MAP_H - 3);
-    } while (isWall(x, y) || Math.hypot(x - player.x, y - player.y) < 4);
+      attempts++;
+    } while ((isWall(x, y) || Math.hypot(x - player.x, y - player.y) < 4) && attempts < 100);
+
     enemies.push({ x, y, health: 2, speed: .75 + Math.random() * .65 });
   }
 
   function startGame() {
-    score = 0; health = 100; ammo = 24;
+    score = 0;
+    health = 100;
+    ammo = 24;
     enemies.length = 0;
+
     player.x = 1.5;
     player.y = 1.5;
     player.angle = 0;
+
     for (let i = 0; i < 7; i++) spawnEnemy();
+
     updateHUD();
     overlay.classList.add("hidden");
     gameOver.classList.add("hidden");
+
     running = true;
+    lastFrameTime = performance.now();
+
     if (view.requestPointerLock) {
       const result = view.requestPointerLock();
       if (result && result.catch) result.catch(() => {});
@@ -347,7 +376,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
       if (along <= 0) continue;
 
       const perpendicular = Math.abs(dx * dirY - dy * dirX);
-      if (perpendicular < .42 && along < best) {
+      if (perpendicular < .45 && along < best) {
         target = enemy;
         best = along;
       }
@@ -355,11 +384,13 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
     if (target) {
       target.health--;
+
       if (target.health <= 0) {
         enemies.splice(enemies.indexOf(target), 1);
         score++;
         ammo = Math.min(24, ammo + 2);
         updateHUD();
+
         if (enemies.length < 10) spawnEnemy();
       }
     }
@@ -369,6 +400,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     if (!running) return;
 
     let forward = 0, strafe = 0;
+
     if (keys.w) forward += 1;
     if (keys.s) forward -= 1;
     if (keys.a) strafe -= 1;
@@ -377,16 +409,16 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     if (touchMove.active) {
       const dx = touchMove.x - touchMove.centerX;
       const dy = touchMove.y - touchMove.centerY;
-      const strength = Math.min(1, Math.hypot(dx, dy) / 60);
+      const strength = Math.min(1, Math.hypot(dx, dy) / 55);
 
-      if (strength > .12) {
+      if (strength > .1) {
         const angle = Math.atan2(dy, dx);
         forward += -Math.sin(angle) * strength;
         strafe += Math.cos(angle) * strength;
       }
     }
 
-    if (forward || strafe) {
+    if (forward !== 0 || strafe !== 0) {
       const length = Math.hypot(forward, strafe);
       forward /= length;
       strafe /= length;
@@ -395,11 +427,11 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
       const cos = Math.cos(player.angle);
       const sin = Math.sin(player.angle);
 
-      const nx = player.x + (cos * forward - sin * strafe) * speed * dt;
-      const ny = player.y + (sin * forward + cos * strafe) * speed * dt;
+      const moveX = (cos * forward - sin * strafe) * speed * dt;
+      const moveY = (sin * forward + cos * strafe) * speed * dt;
 
-      if (canMove(nx, player.y)) player.x = nx;
-      if (canMove(player.x, ny)) player.y = ny;
+      if (canMove(player.x + moveX, player.y)) player.x += moveX;
+      if (canMove(player.x, player.y + moveY)) player.y += moveY;
     }
 
     for (let i = enemies.length - 1; i >= 0; i--) {
@@ -414,19 +446,26 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
       if (!isWall(nx, enemy.y)) enemy.x = nx;
       if (!isWall(enemy.x, ny)) enemy.y = ny;
 
-      if (distance < .65) {
+      if (distance < .7) {
         health -= 12;
         updateHUD();
+
         damageFlash.style.opacity = ".9";
         setTimeout(() => damageFlash.style.opacity = "0", 140);
+
         enemies.splice(i, 1);
-        if (health <= 0) { endGame(); return; }
+
+        if (health <= 0) {
+          endGame();
+          return;
+        }
       }
     }
   }
 
   function castRay(column) {
-    const cameraX = 2 * column / W - 1;
+    const cameraX = 2 * column / RENDER_W - 1;
+
     const dirX = Math.cos(player.angle);
     const dirY = Math.sin(player.angle);
     const planeX = -dirY * Math.tan(FOV / 2);
@@ -444,33 +483,48 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     let stepX, stepY, sideDistX, sideDistY;
 
     if (rayX < 0) {
-      stepX = -1; sideDistX = (player.x - mapX) * deltaDistX;
+      stepX = -1;
+      sideDistX = (player.x - mapX) * deltaDistX;
     } else {
-      stepX = 1; sideDistX = (mapX + 1 - player.x) * deltaDistX;
+      stepX = 1;
+      sideDistX = (mapX + 1 - player.x) * deltaDistX;
     }
 
     if (rayY < 0) {
-      stepY = -1; sideDistY = (player.y - mapY) * deltaDistY;
+      stepY = -1;
+      sideDistY = (player.y - mapY) * deltaDistY;
     } else {
-      stepY = 1; sideDistY = (mapY + 1 - player.y) * deltaDistY;
+      stepY = 1;
+      sideDistY = (mapY + 1 - player.y) * deltaDistY;
     }
 
-    let side = 0, wallType = 1, hit = false;
+    let side = 0;
+    let wallType = 1;
+    let hit = false;
 
     while (!hit) {
       if (sideDistX < sideDistY) {
-        sideDistX += deltaDistX; mapX += stepX; side = 0;
+        sideDistX += deltaDistX;
+        mapX += stepX;
+        side = 0;
       } else {
-        sideDistY += deltaDistY; mapY += stepY; side = 1;
+        sideDistY += deltaDistY;
+        mapY += stepY;
+        side = 1;
       }
 
       if (mapX < 0 || mapY < 0 || mapX >= MAP_W || mapY >= MAP_H) break;
 
       const cell = Number(MAP[mapY][mapX]);
-      if (cell > 0) { wallType = cell; hit = true; }
+      if (cell > 0) {
+        wallType = cell;
+        hit = true;
+      }
     }
 
-    const perpDist = side === 0 ? sideDistX - deltaDistX : sideDistY - deltaDistY;
+    const perpDist = side === 0
+      ? sideDistX - deltaDistX
+      : sideDistY - deltaDistY;
 
     let wallX = side === 0
       ? player.y + perpDist * rayY
@@ -478,38 +532,51 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
     wallX -= Math.floor(wallX);
 
-    return { distance: perpDist, wallX, texture: textures[wallType - 1], side };
+    return {
+      distance: Math.max(perpDist, .05),
+      wallX,
+      texture: textures[wallType - 1],
+      side
+    };
   }
 
   function renderWalls() {
-    const ceiling = ctx.createLinearGradient(0, 0, 0, H / 2);
+    const ceiling = bctx.createLinearGradient(0, 0, 0, RENDER_H / 2);
     ceiling.addColorStop(0, "#0a1522");
     ceiling.addColorStop(1, "#182c42");
-    ctx.fillStyle = ceiling;
-    ctx.fillRect(0, 0, W, H / 2);
 
-    const floor = ctx.createLinearGradient(0, H / 2, 0, H);
+    bctx.fillStyle = ceiling;
+    bctx.fillRect(0, 0, RENDER_W, RENDER_H / 2);
+
+    const floor = bctx.createLinearGradient(0, RENDER_H / 2, 0, RENDER_H);
     floor.addColorStop(0, "#101820");
     floor.addColorStop(1, "#05080c");
-    ctx.fillStyle = floor;
-    ctx.fillRect(0, H / 2, W, H / 2);
 
-    for (let x = 0; x < W; x++) {
+    bctx.fillStyle = floor;
+    bctx.fillRect(0, RENDER_H / 2, RENDER_W, RENDER_H / 2);
+
+    for (let x = 0; x < RENDER_W; x++) {
       const ray = castRay(x);
-      const distance = Math.max(ray.distance, .01);
+      const distance = ray.distance;
+
       zBuffer[x] = distance;
 
-      const lineHeight = H / distance;
-      const drawStart = Math.max(0, (H - lineHeight) / 2);
-      const drawEnd = Math.min(H, (H + lineHeight) / 2);
+      const lineHeight = RENDER_H / distance;
+      const drawStart = Math.max(0, (RENDER_H - lineHeight) / 2);
+      const drawEnd = Math.min(RENDER_H, (RENDER_H + lineHeight) / 2);
       const textureX = Math.min(TEX_SIZE - 1, Math.floor(ray.wallX * TEX_SIZE));
 
-      ctx.drawImage(ray.texture, textureX, 0, 1, TEX_SIZE, x, drawStart, 1, drawEnd - drawStart);
+      bctx.drawImage(
+        ray.texture,
+        textureX, 0, 1, TEX_SIZE,
+        x, drawStart, 1, drawEnd - drawStart
+      );
 
-      const shade = Math.min(.72, distance / 16);
-      const sideShade = ray.side === 1 ? .16 : 0;
-      ctx.fillStyle = `rgba(2,6,12,${shade + sideShade})`;
-      ctx.fillRect(x, drawStart, 1, drawEnd - drawStart);
+      const shade = Math.min(.68, distance / 18);
+      const sideShade = ray.side === 1 ? .15 : 0;
+
+      bctx.fillStyle = `rgba(2,6,12,${shade + sideShade})`;
+      bctx.fillRect(x, drawStart, 1, drawEnd - drawStart);
     }
   }
 
@@ -529,43 +596,54 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     for (const enemy of sorted) {
       const dx = enemy.x - player.x;
       const dy = enemy.y - player.y;
+
       const transformX = invDet * (dirY * dx - dirX * dy);
       const transformY = invDet * (-planeY * dx + planeX * dy);
 
-      if (transformY <= .15) continue;
+      if (transformY <= .2) continue;
 
-      const screenX = Math.floor((W / 2) * (1 + transformX / transformY));
-      const spriteHeight = Math.abs(H / transformY) * .85;
+      const screenX = Math.floor((RENDER_W / 2) * (1 + transformX / transformY));
+      const spriteHeight = Math.abs(RENDER_H / transformY) * .8;
       const spriteWidth = spriteHeight;
-      const drawStartY = -spriteHeight / 2 + H / 2;
-      const drawEndY = spriteHeight / 2 + H / 2;
+
+      const drawStartY = -spriteHeight / 2 + RENDER_H / 2;
+      const drawEndY = spriteHeight / 2 + RENDER_H / 2;
       const drawStartX = -spriteWidth / 2 + screenX;
       const drawEndX = spriteWidth / 2 + screenX;
 
-      for (let x = Math.max(0, Math.floor(drawStartX)); x < Math.min(W, drawEndX); x++) {
+      for (let x = Math.max(0, Math.floor(drawStartX)); x < Math.min(RENDER_W, drawEndX); x++) {
         if (transformY >= zBuffer[x]) continue;
-        const texX = Math.floor(((x - drawStartX) * TEX_SIZE) / spriteWidth);
-        ctx.drawImage(enemySprite, texX, 0, 1, TEX_SIZE, x, drawStartY, 1, drawEndY - drawStartY);
+
+        const texX = Math.min(
+          TEX_SIZE - 1,
+          Math.max(0, Math.floor(((x - drawStartX) * TEX_SIZE) / spriteWidth))
+        );
+
+        bctx.drawImage(
+          enemySprite,
+          texX, 0, 1, TEX_SIZE,
+          x, drawStartY, 1, drawEndY - drawStartY
+        );
       }
     }
   }
 
   function renderWeapon() {
-    const bob = Math.sin(performance.now() / 130) * 5;
-    const baseX = W / 2;
-    const baseY = H + bob;
+    const bob = Math.sin(performance.now() / 130) * 4;
+    const baseX = RENDER_W / 2;
+    const baseY = RENDER_H + bob;
 
-    ctx.fillStyle = "#171d26";
-    ctx.beginPath();
-    ctx.moveTo(baseX - 38, baseY);
-    ctx.lineTo(baseX - 20, baseY - 165);
-    ctx.lineTo(baseX + 20, baseY - 165);
-    ctx.lineTo(baseX + 38, baseY);
-    ctx.closePath();
-    ctx.fill();
+    bctx.fillStyle = "#171d26";
+    bctx.beginPath();
+    bctx.moveTo(baseX - 24, baseY);
+    bctx.lineTo(baseX - 13, baseY - 95);
+    bctx.lineTo(baseX + 13, baseY - 95);
+    bctx.lineTo(baseX + 24, baseY);
+    bctx.closePath();
+    bctx.fill();
 
-    ctx.fillStyle = "#00e5ff";
-    ctx.fillRect(baseX - 8, baseY - 190, 16, 30);
+    bctx.fillStyle = "#00e5ff";
+    bctx.fillRect(baseX - 5, baseY - 108, 10, 17);
   }
 
   function renderMinimap() {
@@ -579,6 +657,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     for (let y = 0; y < MAP_H; y++) {
       for (let x = 0; x < MAP_W; x++) {
         const cell = Number(MAP[y][x]);
+
         mini.fillStyle = cell === 0
           ? "rgba(0,229,255,.07)"
           : cell === 1 ? "rgba(120,80,45,.85)"
@@ -590,6 +669,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     }
 
     mini.fillStyle = "#ff2f5e";
+
     for (const enemy of enemies) {
       mini.beginPath();
       mini.arc(enemy.x * scale, enemy.y * scale, 5, 0, Math.PI * 2);
@@ -600,7 +680,10 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     mini.lineWidth = 2;
     mini.beginPath();
     mini.moveTo(player.x * scale, player.y * scale);
-    mini.lineTo((player.x + Math.cos(player.angle) * 2) * scale, (player.y + Math.sin(player.angle) * 2) * scale);
+    mini.lineTo(
+      (player.x + Math.cos(player.angle) * 2) * scale,
+      (player.y + Math.sin(player.angle) * 2) * scale
+    );
     mini.stroke();
 
     mini.fillStyle = "#00e5ff";
@@ -614,20 +697,26 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     renderEnemies();
     renderWeapon();
     renderMinimap();
+
+    viewCtx.imageSmoothingEnabled = false;
+    viewCtx.drawImage(buffer, 0, 0, W, H);
   }
 
   function endGame() {
     running = false;
     finalScore.textContent = score;
     gameOver.classList.remove("hidden");
+
     if (document.exitPointerLock) document.exitPointerLock();
   }
 
-  function loop(previous) {
-    const now = performance.now();
-    const dt = Math.min(.05, (now - previous) / 1000);
+  function loop(timestamp) {
+    const dt = Math.min(.1, Math.max(0, (timestamp - lastFrameTime) / 1000));
+    lastFrameTime = timestamp;
+
     update(dt);
     render();
+
     requestAnimationFrame(loop);
   }
 
@@ -657,7 +746,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
   view.addEventListener("mousemove", event => {
     if (document.pointerLockElement !== view) return;
-    player.angle += event.movementX * .0026;
+    player.angle += event.movementX * .0028;
   });
 
   view.addEventListener("mousedown", event => {
@@ -683,22 +772,24 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
   function handleTouchStart(event) {
     for (const touch of event.changedTouches) {
+      const rect = joystick.getBoundingClientRect();
+
       const inJoystick =
-        touch.clientX >= joystick.offsetLeft &&
-        touch.clientX <= joystick.offsetLeft + joystick.offsetWidth &&
-        touch.clientY >= joystick.offsetTop &&
-        touch.clientY <= joystick.offsetTop + joystick.offsetHeight;
+        touch.clientX >= rect.left &&
+        touch.clientX <= rect.right &&
+        touch.clientY >= rect.top &&
+        touch.clientY <= rect.bottom;
 
       if (inJoystick && !touchMove.active) {
         touchMove.active = true;
         touchMove.id = touch.identifier;
-        touchMove.centerX = joystick.offsetLeft + joystick.offsetWidth / 2;
-        touchMove.centerY = joystick.offsetTop + joystick.offsetHeight / 2;
+        touchMove.centerX = rect.left + rect.width / 2;
+        touchMove.centerY = rect.top + rect.height / 2;
         touchMove.x = touch.clientX;
         touchMove.y = touch.clientY;
       } else if (
-        touch.clientX > window.innerWidth * .42 &&
-        touch.clientY < window.innerHeight * .72 &&
+        touch.clientX > window.innerWidth * .40 &&
+        touch.clientY < window.innerHeight * .70 &&
         !touchLook.active
       ) {
         touchLook.active = true;
@@ -706,6 +797,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
         touchLook.lastX = touch.clientX;
       }
     }
+
     event.preventDefault();
   }
 
@@ -718,7 +810,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
         const dx = touchMove.x - touchMove.centerX;
         const dy = touchMove.y - touchMove.centerY;
         const distance = Math.hypot(dx, dy);
-        const max = 60;
+        const max = 55;
 
         if (distance > max) {
           touchMove.x = touchMove.centerX + (dx / distance) * max;
@@ -729,10 +821,11 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
       }
 
       if (touchLook.active && touch.identifier === touchLook.id) {
-        player.angle += (touch.clientX - touchLook.lastX) * .005;
+        player.angle += (touch.clientX - touchLook.lastX) * .006;
         touchLook.lastX = touch.clientX;
       }
     }
+
     event.preventDefault();
   }
 
@@ -743,6 +836,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
         touchMove.id = null;
         joystickKnob.style.transform = "translate(-50%, -50%)";
       }
+
       if (touch.identifier === touchLook.id) {
         touchLook.active = false;
         touchLook.id = null;
@@ -767,7 +861,9 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
   textures.push(makeTexture(1), makeTexture(2), makeTexture(3));
   makeEnemySprite();
+
   resize();
+  lastFrameTime = performance.now();
   requestAnimationFrame(loop);
 })();
 </script>
