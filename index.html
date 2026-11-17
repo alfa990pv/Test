@@ -196,25 +196,33 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   const MAP_H = MAP.length;
   const FOV = Math.PI / 3;
   const TEX_SIZE = 64;
-
-  // Render the expensive 3D view at a fixed low resolution,
-  // then scale it to the screen. This keeps movement responsive
-  // even on phones and iPads.
   const RENDER_W = 420;
-  let RENDER_H = 240;
+  const MAX_ENEMIES = 10;
 
   const buffer = document.createElement("canvas");
   buffer.width = RENDER_W;
   const bctx = buffer.getContext("2d", { alpha: false });
 
+  const minimapCache = document.createElement("canvas");
+  minimapCache.width = minimap.width;
+  minimapCache.height = minimap.height;
+  const miniCacheCtx = minimapCache.getContext("2d");
+
+  let RENDER_H = 240;
   let W = 0, H = 0;
   let running = false;
+  let animationFrameId = null;
   let score = 0, health = 100, ammo = 24;
   let lastFrameTime = 0;
+  let damageFlashUntil = 0;
+
+  let ceilingGradient = null;
+  let floorGradient = null;
 
   const player = { x: 1.5, y: 1.5, angle: 0, speed: 5.6, sprint: 1.8, radius: .22 };
   const keys = { w: false, a: false, s: false, d: false, shift: false };
   const enemies = [];
+  const sortedEnemies = [];
   const zBuffer = new Float32Array(RENDER_W);
 
   const touchMove = { active: false, id: null, centerX: 0, centerY: 0, x: 0, y: 0 };
@@ -225,6 +233,17 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   enemySprite.width = 64;
   enemySprite.height = 64;
 
+  const rayResult = {
+    distance: 0,
+    wallX: 0,
+    texture: null,
+    side: 0
+  };
+
+  let displayedScore = -1;
+  let displayedHealth = -1;
+  let displayedAmmo = -1;
+
   function makeTexture(type) {
     const canvas = document.createElement("canvas");
     canvas.width = TEX_SIZE;
@@ -234,16 +253,22 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     if (type === 1) {
       c.fillStyle = "#6b4b2c";
       c.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+
       for (let y = 0; y < TEX_SIZE; y += 16) {
         for (let x = 0; x < TEX_SIZE; x += 32) {
           c.fillStyle = (y / 16) % 2 ? "#7d5935" : "#5c4025";
           c.fillRect(x + ((y / 16) % 2 ? 16 : 0), y, 30, 14);
         }
       }
+
       c.strokeStyle = "rgba(0,0,0,.35)";
       c.lineWidth = 2;
+
       for (let y = 0; y <= TEX_SIZE; y += 16) {
-        c.beginPath(); c.moveTo(0, y); c.lineTo(TEX_SIZE, y); c.stroke();
+        c.beginPath();
+        c.moveTo(0, y);
+        c.lineTo(TEX_SIZE, y);
+        c.stroke();
       }
     }
 
@@ -253,24 +278,32 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
       gradient.addColorStop(1, "#16202e");
       c.fillStyle = gradient;
       c.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+
       c.strokeStyle = "#4fd8ff";
       c.lineWidth = 2;
       c.shadowColor = "#4fd8ff";
       c.shadowBlur = 8;
+
       for (let i = 8; i < TEX_SIZE; i += 16) {
-        c.beginPath(); c.moveTo(i, 0); c.lineTo(i, TEX_SIZE); c.stroke();
+        c.beginPath();
+        c.moveTo(i, 0);
+        c.lineTo(i, TEX_SIZE);
+        c.stroke();
       }
+
       c.shadowBlur = 0;
     }
 
     if (type === 3) {
       c.fillStyle = "#3b3f47";
       c.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+
       for (let i = 0; i < 900; i++) {
         const shade = 45 + Math.random() * 55;
         c.fillStyle = `rgb(${shade},${shade + 5},${shade + 12})`;
         c.fillRect(Math.random() * TEX_SIZE, Math.random() * TEX_SIZE, 3, 3);
       }
+
       c.strokeStyle = "#22262d";
       c.lineWidth = 4;
       c.strokeRect(2, 2, TEX_SIZE - 4, TEX_SIZE - 4);
@@ -292,6 +325,39 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     c.fillRect(24, 44, 16, 4);
   }
 
+  function createBackgroundGradients() {
+    ceilingGradient = bctx.createLinearGradient(0, 0, 0, RENDER_H / 2);
+    ceilingGradient.addColorStop(0, "#0a1522");
+    ceilingGradient.addColorStop(1, "#182c42");
+
+    floorGradient = bctx.createLinearGradient(0, RENDER_H / 2, 0, RENDER_H);
+    floorGradient.addColorStop(0, "#101820");
+    floorGradient.addColorStop(1, "#05080c");
+  }
+
+  function buildMinimapCache() {
+    const size = minimapCache.width;
+    const scale = size / Math.max(MAP_W, MAP_H);
+
+    miniCacheCtx.clearRect(0, 0, size, size);
+    miniCacheCtx.fillStyle = "rgba(3,8,14,.82)";
+    miniCacheCtx.fillRect(0, 0, size, size);
+
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < MAP_W; x++) {
+        const cell = Number(MAP[y][x]);
+
+        miniCacheCtx.fillStyle = cell === 0
+          ? "rgba(0,229,255,.07)"
+          : cell === 1 ? "rgba(120,80,45,.85)"
+          : cell === 2 ? "rgba(0,150,220,.85)"
+          : "rgba(90,100,115,.85)";
+
+        miniCacheCtx.fillRect(x * scale, y * scale, scale - 1, scale - 1);
+      }
+    }
+  }
+
   function resize() {
     W = view.width = Math.max(320, Math.floor(window.innerWidth));
     H = view.height = Math.max(240, Math.floor(window.innerHeight));
@@ -301,6 +367,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     buffer.height = RENDER_H;
 
     viewCtx.imageSmoothingEnabled = false;
+    createBackgroundGradients();
   }
 
   function isWall(x, y) {
@@ -310,26 +377,48 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
   function canMove(x, y) {
     const r = player.radius;
+
     return !isWall(x - r, y - r) && !isWall(x + r, y - r) &&
            !isWall(x - r, y + r) && !isWall(x + r, y + r);
   }
 
   function updateHUD() {
-    scoreEl.textContent = score;
-    healthEl.textContent = health;
-    ammoEl.textContent = ammo;
+    if (score !== displayedScore) {
+      scoreEl.textContent = score;
+      displayedScore = score;
+    }
+
+    if (health !== displayedHealth) {
+      healthEl.textContent = health;
+      displayedHealth = health;
+    }
+
+    if (ammo !== displayedAmmo) {
+      ammoEl.textContent = ammo;
+      displayedAmmo = ammo;
+    }
   }
 
   function spawnEnemy() {
-    let x, y, attempts = 0;
+    for (let attempts = 0; attempts < 120; attempts++) {
+      const x = 1.5 + Math.random() * (MAP_W - 3);
+      const y = 1.5 + Math.random() * (MAP_H - 3);
+      const dx = x - player.x;
+      const dy = y - player.y;
 
-    do {
-      x = 1.5 + Math.random() * (MAP_W - 3);
-      y = 1.5 + Math.random() * (MAP_H - 3);
-      attempts++;
-    } while ((isWall(x, y) || Math.hypot(x - player.x, y - player.y) < 4) && attempts < 100);
+      if (!isWall(x, y) && dx * dx + dy * dy >= 16) {
+        enemies.push({
+          x, y,
+          health: 2,
+          speed: .75 + Math.random() * .65,
+          distanceSquared: 0
+        });
 
-    enemies.push({ x, y, health: 2, speed: .75 + Math.random() * .65 });
+        return true;
+      }
+    }
+
+    return false;
   }
 
   function startGame() {
@@ -337,6 +426,10 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     health = 100;
     ammo = 24;
     enemies.length = 0;
+
+    displayedScore = -1;
+    displayedHealth = -1;
+    displayedAmmo = -1;
 
     player.x = 1.5;
     player.y = 1.5;
@@ -351,126 +444,50 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     running = true;
     lastFrameTime = performance.now();
 
+    if (animationFrameId === null) {
+      animationFrameId = requestAnimationFrame(loop);
+    }
+
     if (view.requestPointerLock) {
       const result = view.requestPointerLock();
       if (result && result.catch) result.catch(() => {});
     }
   }
 
-  function shoot() {
-    if (!running || ammo <= 0) return;
-    ammo--;
-    updateHUD();
+  function stopGame(showStartScreen) {
+    running = false;
 
-    const dirX = Math.cos(player.angle);
-    const dirY = Math.sin(player.angle);
-    let target = null, best = Infinity;
-
-    for (const enemy of enemies) {
-      const dx = enemy.x - player.x;
-      const dy = enemy.y - player.y;
-      const distance = Math.hypot(dx, dy);
-      if (distance <= .01) continue;
-
-      const along = dx * dirX + dy * dirY;
-      if (along <= 0) continue;
-
-      const perpendicular = Math.abs(dx * dirY - dy * dirX);
-      if (perpendicular < .45 && along < best) {
-        target = enemy;
-        best = along;
-      }
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
     }
 
-    if (target) {
-      target.health--;
+    for (const key in keys) keys[key] = false;
 
-      if (target.health <= 0) {
-        enemies.splice(enemies.indexOf(target), 1);
-        score++;
-        ammo = Math.min(24, ammo + 2);
-        updateHUD();
+    touchMove.active = false;
+    touchMove.id = null;
+    touchLook.active = false;
+    touchLook.id = null;
+    joystickKnob.style.transform = "translate(-50%, -50%)";
 
-        if (enemies.length < 10) spawnEnemy();
-      }
+    damageFlash.style.opacity = "0";
+    damageFlashUntil = 0;
+
+    if (showStartScreen) {
+      overlay.classList.remove("hidden");
+      gameOver.classList.add("hidden");
     }
+
+    if (document.exitPointerLock) document.exitPointerLock();
   }
 
-  function update(dt) {
-    if (!running) return;
-
-    let forward = 0, strafe = 0;
-
-    if (keys.w) forward += 1;
-    if (keys.s) forward -= 1;
-    if (keys.a) strafe -= 1;
-    if (keys.d) strafe += 1;
-
-    if (touchMove.active) {
-      const dx = touchMove.x - touchMove.centerX;
-      const dy = touchMove.y - touchMove.centerY;
-      const strength = Math.min(1, Math.hypot(dx, dy) / 55);
-
-      if (strength > .1) {
-        const angle = Math.atan2(dy, dx);
-        forward += -Math.sin(angle) * strength;
-        strafe += Math.cos(angle) * strength;
-      }
-    }
-
-    if (forward !== 0 || strafe !== 0) {
-      const length = Math.hypot(forward, strafe);
-      forward /= length;
-      strafe /= length;
-
-      const speed = player.speed * (keys.shift ? player.sprint : 1);
-      const cos = Math.cos(player.angle);
-      const sin = Math.sin(player.angle);
-
-      const moveX = (cos * forward - sin * strafe) * speed * dt;
-      const moveY = (sin * forward + cos * strafe) * speed * dt;
-
-      if (canMove(player.x + moveX, player.y)) player.x += moveX;
-      if (canMove(player.x, player.y + moveY)) player.y += moveY;
-    }
-
-    for (let i = enemies.length - 1; i >= 0; i--) {
-      const enemy = enemies[i];
-      const dx = player.x - enemy.x;
-      const dy = player.y - enemy.y;
-      const distance = Math.hypot(dx, dy) || 1;
-
-      const nx = enemy.x + (dx / distance) * enemy.speed * dt;
-      const ny = enemy.y + (dy / distance) * enemy.speed * dt;
-
-      if (!isWall(nx, enemy.y)) enemy.x = nx;
-      if (!isWall(enemy.x, ny)) enemy.y = ny;
-
-      if (distance < .7) {
-        health -= 12;
-        updateHUD();
-
-        damageFlash.style.opacity = ".9";
-        setTimeout(() => damageFlash.style.opacity = "0", 140);
-
-        enemies.splice(i, 1);
-
-        if (health <= 0) {
-          endGame();
-          return;
-        }
-      }
-    }
+  function endGame() {
+    finalScore.textContent = score;
+    gameOver.classList.remove("hidden");
+    stopGame(false);
   }
 
-  function castRay(column) {
-    const cameraX = 2 * column / RENDER_W - 1;
-
-    const dirX = Math.cos(player.angle);
-    const dirY = Math.sin(player.angle);
-    const planeX = -dirY * Math.tan(FOV / 2);
-    const planeY = dirX * Math.tan(FOV / 2);
-
+  function castRay(cameraX, dirX, dirY, planeX, planeY) {
     const rayX = dirX + planeX * cameraX;
     const rayY = dirY + planeY * cameraX;
 
@@ -522,9 +539,9 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
       }
     }
 
-    const perpDist = side === 0
+    const perpDist = Math.max(.05, side === 0
       ? sideDistX - deltaDistX
-      : sideDistY - deltaDistY;
+      : sideDistY - deltaDistY);
 
     let wallX = side === 0
       ? player.y + perpDist * rayY
@@ -532,48 +549,217 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
     wallX -= Math.floor(wallX);
 
-    return {
-      distance: Math.max(perpDist, .05),
-      wallX,
-      texture: textures[wallType - 1],
-      side
-    };
+    rayResult.distance = perpDist;
+    rayResult.wallX = wallX;
+    rayResult.texture = textures[wallType - 1];
+    rayResult.side = side;
+
+    return rayResult;
+  }
+
+  function getWallDistance(dirX, dirY) {
+    let mapX = Math.floor(player.x);
+    let mapY = Math.floor(player.y);
+
+    const deltaDistX = Math.abs(dirX) < 1e-8 ? 1e30 : Math.abs(1 / dirX);
+    const deltaDistY = Math.abs(dirY) < 1e-8 ? 1e30 : Math.abs(1 / dirY);
+
+    const stepX = dirX < 0 ? -1 : 1;
+    const stepY = dirY < 0 ? -1 : 1;
+
+    let sideDistX = dirX < 0
+      ? (player.x - mapX) * deltaDistX
+      : (mapX + 1 - player.x) * deltaDistX;
+
+    let sideDistY = dirY < 0
+      ? (player.y - mapY) * deltaDistY
+      : (mapY + 1 - player.y) * deltaDistY;
+
+    for (let steps = 0; steps < 64; steps++) {
+      let side;
+
+      if (sideDistX < sideDistY) {
+        sideDistX += deltaDistX;
+        mapX += stepX;
+        side = 0;
+      } else {
+        sideDistY += deltaDistY;
+        mapY += stepY;
+        side = 1;
+      }
+
+      if (mapX < 0 || mapY < 0 || mapX >= MAP_W || mapY >= MAP_H) {
+        return Infinity;
+      }
+
+      if (MAP[mapY][mapX] !== "0") {
+        return side === 0
+          ? sideDistX - deltaDistX
+          : sideDistY - deltaDistY;
+      }
+    }
+
+    return Infinity;
+  }
+
+  function shoot() {
+    if (!running || ammo <= 0) return;
+
+    ammo--;
+    updateHUD();
+
+    const dirX = Math.cos(player.angle);
+    const dirY = Math.sin(player.angle);
+    const wallDistance = getWallDistance(dirX, dirY);
+
+    let target = null;
+    let bestDistance = Infinity;
+
+    for (const enemy of enemies) {
+      const dx = enemy.x - player.x;
+      const dy = enemy.y - player.y;
+
+      const along = dx * dirX + dy * dirY;
+
+      if (along <= 0 || along >= wallDistance) continue;
+
+      const perpendicular = Math.abs(dx * dirY - dy * dirX);
+
+      if (perpendicular < .45 && along < bestDistance) {
+        target = enemy;
+        bestDistance = along;
+      }
+    }
+
+    if (target) {
+      target.health--;
+
+      if (target.health <= 0) {
+        enemies.splice(enemies.indexOf(target), 1);
+        score++;
+        ammo = Math.min(24, ammo + 2);
+        updateHUD();
+
+        if (enemies.length < MAX_ENEMIES) spawnEnemy();
+      }
+    }
+  }
+
+  function update(dt) {
+    if (!running) return;
+
+    let forward = 0;
+    let strafe = 0;
+
+    if (keys.w) forward += 1;
+    if (keys.s) forward -= 1;
+    if (keys.a) strafe -= 1;
+    if (keys.d) strafe += 1;
+
+    if (touchMove.active) {
+      const dx = touchMove.x - touchMove.centerX;
+      const dy = touchMove.y - touchMove.centerY;
+      const strength = Math.min(1, Math.hypot(dx, dy) / 55);
+
+      if (strength > .1) {
+        const angle = Math.atan2(dy, dx);
+        forward += -Math.sin(angle) * strength;
+        strafe += Math.cos(angle) * strength;
+      }
+    }
+
+    if (forward !== 0 || strafe !== 0) {
+      const length = Math.hypot(forward, strafe);
+      forward /= length;
+      strafe /= length;
+
+      const speed = player.speed * (keys.shift ? player.sprint : 1);
+      const cos = Math.cos(player.angle);
+      const sin = Math.sin(player.angle);
+
+      const moveX = (cos * forward - sin * strafe) * speed * dt;
+      const moveY = (sin * forward + cos * strafe) * speed * dt;
+
+      if (canMove(player.x + moveX, player.y)) player.x += moveX;
+      if (canMove(player.x, player.y + moveY)) player.y += moveY;
+    }
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const enemy = enemies[i];
+      const dx = player.x - enemy.x;
+      const dy = player.y - enemy.y;
+      const distanceSquared = dx * dx + dy * dy;
+      const distance = Math.sqrt(distanceSquared) || 1;
+
+      const nx = enemy.x + (dx / distance) * enemy.speed * dt;
+      const ny = enemy.y + (dy / distance) * enemy.speed * dt;
+
+      if (!isWall(nx, enemy.y)) enemy.x = nx;
+      if (!isWall(enemy.x, ny)) enemy.y = ny;
+
+      const postDx = player.x - enemy.x;
+      const postDy = player.y - enemy.y;
+      const postDistanceSquared = postDx * postDx + postDy * postDy;
+
+      if (postDistanceSquared < .49) {
+        health -= 12;
+        updateHUD();
+
+        damageFlashUntil = performance.now() + 140;
+        damageFlash.style.opacity = ".9";
+
+        enemies.splice(i, 1);
+
+        if (health <= 0) {
+          endGame();
+          return;
+        }
+      }
+    }
+
+    if (damageFlashUntil && performance.now() >= damageFlashUntil) {
+      damageFlash.style.opacity = "0";
+      damageFlashUntil = 0;
+    }
   }
 
   function renderWalls() {
-    const ceiling = bctx.createLinearGradient(0, 0, 0, RENDER_H / 2);
-    ceiling.addColorStop(0, "#0a1522");
-    ceiling.addColorStop(1, "#182c42");
-
-    bctx.fillStyle = ceiling;
+    bctx.fillStyle = ceilingGradient;
     bctx.fillRect(0, 0, RENDER_W, RENDER_H / 2);
 
-    const floor = bctx.createLinearGradient(0, RENDER_H / 2, 0, RENDER_H);
-    floor.addColorStop(0, "#101820");
-    floor.addColorStop(1, "#05080c");
-
-    bctx.fillStyle = floor;
+    bctx.fillStyle = floorGradient;
     bctx.fillRect(0, RENDER_H / 2, RENDER_W, RENDER_H / 2);
 
+    const dirX = Math.cos(player.angle);
+    const dirY = Math.sin(player.angle);
+    const planeLength = Math.tan(FOV / 2);
+    const planeX = -dirY * planeLength;
+    const planeY = dirX * planeLength;
+
     for (let x = 0; x < RENDER_W; x++) {
-      const ray = castRay(x);
-      const distance = ray.distance;
+      const cameraX = 2 * x / RENDER_W - 1;
+      const ray = castRay(cameraX, dirX, dirY, planeX, planeY);
 
-      zBuffer[x] = distance;
+      const rayDistance = ray.distance;
+      const rayWallX = ray.wallX;
+      const rayTexture = ray.texture;
+      const raySide = ray.side;
 
-      const lineHeight = RENDER_H / distance;
+      zBuffer[x] = rayDistance;
+
+      const lineHeight = RENDER_H / rayDistance;
       const drawStart = Math.max(0, (RENDER_H - lineHeight) / 2);
       const drawEnd = Math.min(RENDER_H, (RENDER_H + lineHeight) / 2);
-      const textureX = Math.min(TEX_SIZE - 1, Math.floor(ray.wallX * TEX_SIZE));
+      const textureX = Math.min(TEX_SIZE - 1, Math.floor(rayWallX * TEX_SIZE));
 
       bctx.drawImage(
-        ray.texture,
+        rayTexture,
         textureX, 0, 1, TEX_SIZE,
         x, drawStart, 1, drawEnd - drawStart
       );
 
-      const shade = Math.min(.68, distance / 18);
-      const sideShade = ray.side === 1 ? .15 : 0;
+      const shade = Math.min(.68, rayDistance / 18);
+      const sideShade = raySide === 1 ? .15 : 0;
 
       bctx.fillStyle = `rgba(2,6,12,${shade + sideShade})`;
       bctx.fillRect(x, drawStart, 1, drawEnd - drawStart);
@@ -581,19 +767,25 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   }
 
   function renderEnemies() {
+    sortedEnemies.length = 0;
+
+    for (const enemy of enemies) {
+      const dx = enemy.x - player.x;
+      const dy = enemy.y - player.y;
+      enemy.distanceSquared = dx * dx + dy * dy;
+      sortedEnemies.push(enemy);
+    }
+
+    sortedEnemies.sort((a, b) => b.distanceSquared - a.distanceSquared);
+
     const dirX = Math.cos(player.angle);
     const dirY = Math.sin(player.angle);
-    const planeX = -dirY * Math.tan(FOV / 2);
-    const planeY = dirX * Math.tan(FOV / 2);
+    const planeLength = Math.tan(FOV / 2);
+    const planeX = -dirY * planeLength;
+    const planeY = dirX * planeLength;
     const invDet = 1 / (planeX * dirY - dirX * planeY);
 
-    const sorted = [...enemies].sort((a, b) => {
-      const da = (a.x - player.x) ** 2 + (a.y - player.y) ** 2;
-      const db = (b.x - player.x) ** 2 + (b.y - player.y) ** 2;
-      return db - da;
-    });
-
-    for (const enemy of sorted) {
+    for (const enemy of sortedEnemies) {
       const dx = enemy.x - player.x;
       const dy = enemy.y - player.y;
 
@@ -647,26 +839,10 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   }
 
   function renderMinimap() {
-    const size = minimap.width;
-    const scale = size / Math.max(MAP_W, MAP_H);
+    mini.clearRect(0, 0, minimap.width, minimap.height);
+    mini.drawImage(minimapCache, 0, 0);
 
-    mini.clearRect(0, 0, size, size);
-    mini.fillStyle = "rgba(3,8,14,.82)";
-    mini.fillRect(0, 0, size, size);
-
-    for (let y = 0; y < MAP_H; y++) {
-      for (let x = 0; x < MAP_W; x++) {
-        const cell = Number(MAP[y][x]);
-
-        mini.fillStyle = cell === 0
-          ? "rgba(0,229,255,.07)"
-          : cell === 1 ? "rgba(120,80,45,.85)"
-          : cell === 2 ? "rgba(0,150,220,.85)"
-          : "rgba(90,100,115,.85)";
-
-        mini.fillRect(x * scale, y * scale, scale - 1, scale - 1);
-      }
-    }
+    const scale = minimap.width / Math.max(MAP_W, MAP_H);
 
     mini.fillStyle = "#ff2f5e";
 
@@ -702,22 +878,19 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     viewCtx.drawImage(buffer, 0, 0, W, H);
   }
 
-  function endGame() {
-    running = false;
-    finalScore.textContent = score;
-    gameOver.classList.remove("hidden");
-
-    if (document.exitPointerLock) document.exitPointerLock();
-  }
-
   function loop(timestamp) {
+    if (!running) {
+      animationFrameId = null;
+      return;
+    }
+
     const dt = Math.min(.1, Math.max(0, (timestamp - lastFrameTime) / 1000));
     lastFrameTime = timestamp;
 
     update(dt);
     render();
 
-    requestAnimationFrame(loop);
+    animationFrameId = requestAnimationFrame(loop);
   }
 
   window.addEventListener("resize", resize);
@@ -744,6 +917,16 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     }
   });
 
+  window.addEventListener("blur", () => {
+    for (const key in keys) keys[key] = false;
+
+    if (running) stopGame(true);
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && running) stopGame(true);
+  });
+
   view.addEventListener("mousemove", event => {
     if (document.pointerLockElement !== view) return;
     player.angle += event.movementX * .0028;
@@ -760,9 +943,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
   document.addEventListener("pointerlockchange", () => {
     if (!document.pointerLockElement && running) {
-      running = false;
-      overlay.classList.remove("hidden");
-      gameOver.classList.add("hidden");
+      stopGame(true);
     }
   });
 
@@ -770,85 +951,102 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
     return "ontouchstart" in window || navigator.maxTouchPoints > 0;
   }
 
-  function handleTouchStart(event) {
+  function handleJoystickStart(event) {
     for (const touch of event.changedTouches) {
+      if (touchMove.active) continue;
+
       const rect = joystick.getBoundingClientRect();
 
-      const inJoystick =
-        touch.clientX >= rect.left &&
-        touch.clientX <= rect.right &&
-        touch.clientY >= rect.top &&
-        touch.clientY <= rect.bottom;
-
-      if (inJoystick && !touchMove.active) {
-        touchMove.active = true;
-        touchMove.id = touch.identifier;
-        touchMove.centerX = rect.left + rect.width / 2;
-        touchMove.centerY = rect.top + rect.height / 2;
-        touchMove.x = touch.clientX;
-        touchMove.y = touch.clientY;
-      } else if (
-        touch.clientX > window.innerWidth * .40 &&
-        touch.clientY < window.innerHeight * .70 &&
-        !touchLook.active
-      ) {
-        touchLook.active = true;
-        touchLook.id = touch.identifier;
-        touchLook.lastX = touch.clientX;
-      }
+      touchMove.active = true;
+      touchMove.id = touch.identifier;
+      touchMove.centerX = rect.left + rect.width / 2;
+      touchMove.centerY = rect.top + rect.height / 2;
+      touchMove.x = touch.clientX;
+      touchMove.y = touch.clientY;
     }
 
     event.preventDefault();
   }
 
-  function handleTouchMove(event) {
+  function handleJoystickMove(event) {
     for (const touch of event.changedTouches) {
-      if (touchMove.active && touch.identifier === touchMove.id) {
-        touchMove.x = touch.clientX;
-        touchMove.y = touch.clientY;
+      if (!touchMove.active || touch.identifier !== touchMove.id) continue;
 
-        const dx = touchMove.x - touchMove.centerX;
-        const dy = touchMove.y - touchMove.centerY;
-        const distance = Math.hypot(dx, dy);
-        const max = 55;
+      touchMove.x = touch.clientX;
+      touchMove.y = touch.clientY;
 
-        if (distance > max) {
-          touchMove.x = touchMove.centerX + (dx / distance) * max;
-          touchMove.y = touchMove.centerY + (dy / distance) * max;
-        }
+      const dx = touchMove.x - touchMove.centerX;
+      const dy = touchMove.y - touchMove.centerY;
+      const distance = Math.hypot(dx, dy);
+      const max = 55;
 
-        joystickKnob.style.transform = `translate(calc(-50% + ${touchMove.x - touchMove.centerX}px), calc(-50% + ${touchMove.y - touchMove.centerY}px))`;
+      if (distance > max) {
+        touchMove.x = touchMove.centerX + (dx / distance) * max;
+        touchMove.y = touchMove.centerY + (dy / distance) * max;
       }
 
-      if (touchLook.active && touch.identifier === touchLook.id) {
-        player.angle += (touch.clientX - touchLook.lastX) * .006;
-        touchLook.lastX = touch.clientX;
-      }
+      joystickKnob.style.transform = `translate(calc(-50% + ${touchMove.x - touchMove.centerX}px), calc(-50% + ${touchMove.y - touchMove.centerY}px))`;
     }
 
     event.preventDefault();
   }
 
-  function handleTouchEnd(event) {
+  function handleJoystickEnd(event) {
     for (const touch of event.changedTouches) {
-      if (touch.identifier === touchMove.id) {
-        touchMove.active = false;
-        touchMove.id = null;
-        joystickKnob.style.transform = "translate(-50%, -50%)";
-      }
+      if (touch.identifier !== touchMove.id) continue;
 
-      if (touch.identifier === touchLook.id) {
-        touchLook.active = false;
-        touchLook.id = null;
-      }
+      touchMove.active = false;
+      touchMove.id = null;
+      joystickKnob.style.transform = "translate(-50%, -50%)";
     }
+
+    event.preventDefault();
+  }
+
+  function handleLookStart(event) {
+    for (const touch of event.changedTouches) {
+      if (touchLook.active) continue;
+
+      touchLook.active = true;
+      touchLook.id = touch.identifier;
+      touchLook.lastX = touch.clientX;
+    }
+
+    event.preventDefault();
+  }
+
+  function handleLookMove(event) {
+    for (const touch of event.changedTouches) {
+      if (!touchLook.active || touch.identifier !== touchLook.id) continue;
+
+      player.angle += (touch.clientX - touchLook.lastX) * .006;
+      touchLook.lastX = touch.clientX;
+    }
+
+    event.preventDefault();
+  }
+
+  function handleLookEnd(event) {
+    for (const touch of event.changedTouches) {
+      if (touch.identifier !== touchLook.id) continue;
+
+      touchLook.active = false;
+      touchLook.id = null;
+    }
+
+    event.preventDefault();
   }
 
   if (isTouchDevice()) {
-    view.addEventListener("touchstart", handleTouchStart, { passive: false });
-    view.addEventListener("touchmove", handleTouchMove, { passive: false });
-    view.addEventListener("touchend", handleTouchEnd, { passive: false });
-    view.addEventListener("touchcancel", handleTouchEnd, { passive: false });
+    joystick.addEventListener("touchstart", handleJoystickStart, { passive: false });
+    joystick.addEventListener("touchmove", handleJoystickMove, { passive: false });
+    joystick.addEventListener("touchend", handleJoystickEnd, { passive: false });
+    joystick.addEventListener("touchcancel", handleJoystickEnd, { passive: false });
+
+    view.addEventListener("touchstart", handleLookStart, { passive: false });
+    view.addEventListener("touchmove", handleLookMove, { passive: false });
+    view.addEventListener("touchend", handleLookEnd, { passive: false });
+    view.addEventListener("touchcancel", handleLookEnd, { passive: false });
 
     fireButton.addEventListener("touchstart", event => {
       event.preventDefault();
@@ -863,8 +1061,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   makeEnemySprite();
 
   resize();
-  lastFrameTime = performance.now();
-  requestAnimationFrame(loop);
+  buildMinimapCache();
 })();
 </script>
 </body>
