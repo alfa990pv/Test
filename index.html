@@ -199,7 +199,7 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
   let running = false;
   let score = 0, health = 100, ammo = 24;
 
-  const player = { x: 1.5, y: 1.5, angle: 0, speed: 3.1, sprint: 1.75, radius: .22 };
+  const player = { x: 1.5, y: 1.5, angle: 0, speed: 5.4, sprint: 1.8, radius: .22 };
   const keys = { w: false, a: false, s: false, d: false, shift: false };
   const enemies = [];
   const zBuffer = [];
@@ -635,13 +635,24 @@ button:hover { transform: translateY(-2px); box-shadow: 0 0 22px rgba(0,229,255,
 
   window.addEventListener("keydown", event => {
     const key = event.code.replace("Key", "").toLowerCase();
+
     if (key in keys) keys[key] = true;
+
+    if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+      keys.shift = true;
+    }
+
     if (event.code === "Space") event.preventDefault();
   });
 
   window.addEventListener("keyup", event => {
     const key = event.code.replace("Key", "").toLowerCase();
+
     if (key in keys) keys[key] = false;
+
+    if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+      keys.shift = false;
+    }
   });
 
   view.addEventListener("mousemove", event => {
